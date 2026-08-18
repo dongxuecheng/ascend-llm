@@ -1,12 +1,87 @@
 # openEuler 22.03 LTS SP4 + Atlas 300I Duo 部署 Qwen3.6-35B-A3B-W8A8
 
-> 文档基线：2026-08-12
+> 文档基线：2026-08-18
 >
 > 目标硬件：鲲鹏 920、Atlas 300I Duo 96GB × 2、主机内存 128GB
 >
 > 目标服务：OpenAI 兼容 API，模型 <code>Eco-Tech/Qwen3.6-35B-A3B-w8a8</code>
 
 本文从一台刚安装完 openEuler 22.03 LTS SP4 的服务器开始，完成系统检查、Atlas 驱动与固件、Docker、模型权重以及 vLLM Ascend 服务部署。
+
+## Docker Compose 双实例快速部署（推荐）
+
+仓库已经包含可直接部署的生产基线：
+
+~~~text
+Nginx 127.0.0.1:8000
+├── qwen36-a 127.0.0.1:8080 → davinci0,1 → TP=2
+└── qwen36-b 127.0.0.1:8081 → davinci2,3 → TP=2
+~~~
+
+主要文件：
+
+~~~text
+docker-compose.yml          两个 vLLM 实例和本地 Nginx 网关
+.env.example                镜像、模型、上下文和内存保护参数
+nginx/default.conf.template least_conn 负载均衡和流式代理配置
+scripts/preflight.sh        模型、驱动、设备、NUMA 和 Compose 预检
+scripts/deploy.sh           自动 NUMA CPU 亲和、顺序冷启动和内存闸门
+scripts/status.sh           容器、API、内存和 NPU 状态
+scripts/logs.sh             跟踪指定容器日志
+scripts/smoke-test.sh        OpenAI Chat Completions 冒烟测试
+scripts/image-test.sh        图片识别端到端验收
+scripts/down.sh              停止并删除本项目容器
+~~~
+
+如果服务器还没有 Compose，openEuler 22.03 可以从已配置的软件仓库安装：
+
+~~~bash
+dnf install -y docker-compose
+docker-compose version
+~~~
+
+脚本同时兼容 `docker compose` 插件和 `docker-compose` 独立命令。进入上传或克隆好的项目目录后执行：
+
+~~~bash
+sudo -i
+cd /data/packages/ascend-llm
+cp .env.example .env
+chmod +x scripts/*.sh
+./scripts/preflight.sh
+~~~
+
+`.env` 默认保持网关只监听本机。`deploy.sh` 会读取两张卡的 PCIe NUMA 节点，并把每个实例限制在对应 NUMA CPU 集合中。不要在没有鉴权和 TLS 的情况下把 `GATEWAY_LISTEN` 改成 `0.0.0.0:8000`。
+
+从此前手工创建的 `qwen36-a` 容器迁移到 Compose，并启动双实例：
+
+~~~bash
+./scripts/deploy.sh dual --replace-existing
+~~~
+
+`--replace-existing` 只删除同名旧容器，不删除镜像、模型或 `/data` 数据；删除前会把旧容器的 `inspect` 和日志保存到 `/data/logs/compose-migration-<时间>`。两个约 38GB 的实例会顺序启动，第一实例健康且主机可用内存仍不少于 48GiB 时才启动第二实例。每个实例首次冷启动最长允许 15 分钟。
+
+部署完成后：
+
+~~~bash
+./scripts/status.sh
+./scripts/smoke-test.sh
+./scripts/image-test.sh /data/test.jpg
+~~~
+
+应用统一访问：
+
+~~~text
+http://127.0.0.1:8000/v1
+~~~
+
+如果第二张卡或 128GB 主机内存无法通过双实例验收，可回退到单实例：
+
+~~~bash
+./scripts/down.sh
+./scripts/deploy.sh single
+~~~
+
+单实例直接访问 `http://127.0.0.1:8080/v1`。脚本不会把一个请求拆到两张物理卡上；双实例提高的是并发吞吐和可用性，单请求延迟仍由单个 TP=2 实例决定。
 
 ## 1. 最终方案
 
@@ -17,24 +92,24 @@
 | 主机系统 | openEuler 22.03 LTS SP4，aarch64 |
 | 主机侧昇腾软件 | 与该 310P 镜像所带 CANN 平台版本配套的 Ascend HDK 驱动和固件 |
 | 容器 | Docker |
-| 推理镜像 | <code>quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler</code> |
-| 容器内软件 | 由镜像整体锁定；vLLM 0.23.0、vLLM Ascend 0.23.0rc1，CANN/TorchNPU 以镜像实测输出为准 |
+| 推理镜像 | <code>quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler</code> |
+| 容器内软件 | 由镜像整体锁定；vLLM 0.23.0、vLLM Ascend 0.23.0，CANN/TorchNPU 以镜像实测输出为准 |
 | 模型 | <code>Eco-Tech/Qwen3.6-35B-A3B-w8a8</code> |
-| 首实例 | 一张物理 Atlas 300I Duo 的两个 310P 芯片，TP=2 |
-| API | 仅监听 <code>127.0.0.1:8080</code>，外部访问交给反向代理或 API 网关 |
+| 部署拓扑 | 每张物理 Atlas 300I Duo 启动一个 TP=2 副本，共两个副本 |
+| API | 两个后端监听 <code>127.0.0.1:8080/8081</code>，Nginx 统一监听 <code>127.0.0.1:8000</code> |
 
-Atlas 300I Duo 每张物理卡包含两个 Ascend 310P 芯片，96GB 是整张卡的总显存。两张物理卡通常会形成四个逻辑 NPU 设备。首次部署只使用同一张物理卡上的两个芯片；第一实例连续稳定运行后，再考虑用另一张卡启动第二副本。
+Atlas 300I Duo 每张物理卡包含两个 Ascend 310P 芯片，96GB 是整张卡的总显存。两张物理卡形成四个逻辑 NPU 设备。每个模型副本只使用同一张物理卡内的两个芯片，避免单个请求跨物理卡执行 TP=4；两个副本由本地 Nginx 按最少连接数分发请求。
 
-128GB 主机内存可以部署首实例，但余量不宽裕。因此本教程：
+128GB 主机内存已经验证首实例运行后仍有约 100GiB 可用。双实例采用顺序冷启动和 48GiB 可用内存闸门；若现场压力测试出现持续 swap、OOM 或可用内存低于 20GiB，应立即回退单实例，生产双实例仍建议升级到 256GB。因此本教程：
 
 - 不使用 CPU offload；
-- 不同时加载两个实例；
+- 不同时冷启动两个实例；
 - 使用 W8A8 权重；
 - 初始上下文固定为 20,480 token；
-- 初始最大活跃序列数为 16，若出现主机或 NPU 内存压力则先降到 8；
+- 每实例最大活跃序列数为 8，双实例合计为 16；
 - 默认关闭前缀缓存和 MTP 推测解码。
 
-注意：<code>v0.23.0rc1</code> 是 release candidate，且是该系列首次明确加入 310P 上 Qwen3.5/Qwen3.6 支持的版本。当前方案是这套硬件运行目标模型的最佳官方路径，但仍应按生产前候选版本进行至少 24 小时稳定性、精度和压力验收，不能把“成功启动”视为生产验收完成。
+截至文档基线日期，vLLM Ascend 官方安装页已经提供稳定版 <code>v0.23.0-310p-openeuler</code>，因此不再使用早期的 <code>v0.23.0rc1</code>。即便使用稳定版，正式上线前仍应完成至少 24 小时稳定性、精度和压力验收，不能把“成功启动”视为生产验收完成。
 
 ## 2. 重要原则
 
@@ -58,220 +133,131 @@ vLLM Ascend 的 310P 安装说明要求使用平台专用 CANN 9.1.0 版本线�
 
 如果华为兼容性查询或 HDK 发布说明没有列出当前服务器型号、openEuler 22.03 LTS SP4 和当前内核组合，不要强装。应选择厂商认证内核/OS，或提交华为技术工单确认。
 
-## 3. 安装前准备
+## 3. 当前服务器基线与部署进度
 
-所有命令均在服务器上执行。先切换到 root：
+本文现在按已经取得的现场输出维护，不再把服务器当成完全未知的裸机。当前已确认：
+
+| 项目 | 现场结果 | 结论 |
+|---|---|---|
+| 服务器 | Huawei TaiShan 200（Model 2280） | 正常 |
+| CPU | 鲲鹏 920 5220，双路、64 核、2 个 NUMA 节点 | 正常 |
+| 操作系统 | openEuler 22.03 LTS SP4，aarch64 | 正常 |
+| 内核 | <code>5.10.0-216.0.0.115.oe2203sp4.aarch64</code> | 驱动依赖已与运行内核匹配 |
+| 主机内存 | 标称 128GB，系统可见约 124GiB，swap 4GB | 单实例可用，余量有限 |
+| NPU | Atlas 300I Duo 96GB × 2，共 4 个逻辑设备 | <code>davinci0..3</code> 均健康 |
+| 驱动 | <code>npu-smi 25.5.2</code>，通过官方 <code>.run</code> 包预装 | 不要重复安装或覆盖 |
+| 第一张卡 | PCIe <code>0000:01:00.0</code>，Gen4 x16 | 首实例使用 <code>davinci0,1</code> |
+| 第二张卡 | PCIe <code>0000:03:00.0</code>，Gen4 x8（降级） | 暂不用于首实例，后续排查槽位/链路 |
+| 数据盘 | <code>/dev/sdb1</code>，XFS，7.3TB，挂载到 <code>/data</code> | <code>ftype=1</code>，适合 overlay2 |
+| Docker | openEuler <code>docker-engine 18.09.0-350.oe2203sp4</code> | 容器和模型实跑均已通过 |
+| SELinux | Enforcing | Docker、模型和日志目录标签均已验收 |
+
+当前目录规划：
+
+~~~text
+/data/docker       Docker data-root
+/data/models       模型权重
+/data/logs         服务日志
+/data/packages     离线安装包或临时下载
+~~~
+
+所有后续命令均在服务器上以 root 执行：
 
 ~~~bash
 sudo -i
 ~~~
 
-### 3.1 核对系统、CPU、内存和磁盘
+建议先设置一个明确的静态主机名，避免后续日志和监控中持续出现 <code>localhost.localdomain</code>：
 
 ~~~bash
-uname -m
-uname -r
-cat /etc/os-release
-lscpu
-free -h
-swapon --show
-df -hT
+hostnamectl set-hostname hz-server
 ~~~
 
-必须确认：
+这是管理性变更，不影响已有 IP 和 SSH 连接。
 
-- <code>uname -m</code> 输出 <code>aarch64</code>；
-- 系统是 openEuler 22.03 LTS SP4；
-- 物理内存约 128GB；
-- 用于 Docker 和模型的本地磁盘至少空闲 150GB，推荐 500GB 以上；
-- 模型目录最好位于本地 NVMe，不要使用低速网络盘。
+## 4. 处理已预装的 Atlas 驱动
 
-后文使用 <code>/data</code> 保存权重和日志。如果实际数据盘挂载点不同，请统一替换路径。
+当前服务器已经通过 <code>.run</code> 包完成驱动和固件安装，<code>/etc/ascend_install.info</code> 显示 full 安装成功，四个逻辑 NPU 的 Health 均为 OK。因此本机不执行任何驱动安装、覆盖安装或升级命令。
 
-### 3.2 核对两张加速卡
-
-~~~bash
-lspci -nn | grep -i -E 'Huawei|19e5|Ascend'
-lspci -tv
-~~~
-
-这里不以 <code>lspci</code> 行数判断 NPU 数量，因为一张卡可能暴露多个 PCIe 功能。只要两张物理卡都能在 PCIe 拓扑中识别即可；逻辑 NPU 数量在驱动安装后用 <code>npu-smi</code> 确认。
-
-### 3.3 记录当前状态
-
-~~~bash
-mkdir -p /var/log/ascend-install
-uname -a > /var/log/ascend-install/uname-before.txt
-lspci -nn > /var/log/ascend-install/lspci-before.txt
-free -h > /var/log/ascend-install/memory-before.txt
-~~~
-
-## 4. 获取正确的驱动与固件
-
-打开以下两个官方页面：
-
-- [CANN 9.1.0 版本说明与 HDK 配套关系](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md)
-- [昇腾商用驱动和固件下载](https://www.hiascend.com/HARDWARE/firmware-drivers/commercial)
-
-还应使用服务器整机厂商提供的兼容性清单，或华为计算产品兼容性查询，核对 openEuler 22.03 LTS SP4 与当前内核。
-
-下载以下 aarch64 安装包及其签名/校验文件：
+特别注意：本机宿主侧命令实际位于：
 
 ~~~text
-Ascend-hdk-310p-npu-driver_<配套版本>_linux-aarch64.run
-Ascend-hdk-310p-npu-firmware_<配套版本>.run
+/usr/local/sbin/npu-smi
 ~~~
 
-将文件上传到 <code>/opt/ascend-hdk</code>。为了让后续命令可复制，可以在确认目录中只有一份驱动和一份固件后，将它们分别命名为：
-
-~~~text
-/opt/ascend-hdk/driver.run
-/opt/ascend-hdk/firmware.run
-~~~
-
-不要用通配符自动重命名。如果目录中存在多个版本，先移走旧包。
-
-## 5. 安装主机依赖
-
-### 5.1 检查软件源
+而官方 vLLM Ascend 容器通常从 <code>/usr/local/bin/npu-smi</code> 调用它，所以容器挂载应把宿主源路径映射到容器目标路径：
 
 ~~~bash
-dnf makecache
+-v /usr/local/sbin/npu-smi:/usr/local/bin/npu-smi:ro
 ~~~
 
-如果失败，先修复 openEuler 22.03 LTS SP4 软件源和 DNS，不要继续。
+不要照搬官方示例中的宿主源路径，否则 Docker 会在不存在的位置创建目录，随后导致容器内 <code>npu-smi</code> 不可用。
 
-### 5.2 安装驱动编译依赖和运维工具
-
-~~~bash
-dnf install -y \
-  make \
-  dkms \
-  gcc \
-  gcc-c++ \
-  kernel-headers-$(uname -r) \
-  kernel-devel-$(uname -r) \
-  pciutils \
-  numactl \
-  curl \
-  wget \
-  jq \
-  tar \
-  gzip \
-  lsof
-~~~
-
-验证运行内核与开发包完全匹配：
+部署前只做只读验收：
 
 ~~~bash
-rpm -q kernel-headers-$(uname -r)
-rpm -q kernel-devel-$(uname -r)
-test -e /lib/modules/$(uname -r)/build
-gcc --version
-dkms --version
-~~~
-
-三个检查都必须成功。若仓库没有当前内核的 <code>kernel-devel</code>：
-
-1. 不要安装一个不同版本的开发包；
-2. 启用与当前 SP4 内核对应的软件仓库，或从 openEuler 官方仓库取得完全相同版本 RPM；
-3. 如果决定升级内核，应把 kernel、kernel-devel、kernel-headers 一起升级并重启；
-4. 重启后重新执行本节检查，再安装 NPU 驱动。
-
-## 6. 安装 Atlas 驱动与固件
-
-以下是“系统中尚未安装驱动”的首次安装流程。若 <code>npu-smi info</code> 已经能返回信息，这属于覆盖安装或升级，安装顺序和参数不同，应改用对应 HDK 版本的升级文档，不要直接套用本节。
-
-### 6.1 检查安装包
-
-~~~bash
-cd /opt/ascend-hdk
-ls -lh driver.run firmware.run
-chmod 500 driver.run firmware.run
-./driver.run --check
-./firmware.run --check
-sha256sum driver.run firmware.run
-~~~
-
-<code>--check</code> 必须显示归档完整性和 SHA256 校验通过。还要把 <code>sha256sum</code> 输出与下载页提供的值对比并保存：
-
-~~~bash
-sha256sum driver.run firmware.run > /var/log/ascend-install/hdk-sha256.txt
-~~~
-
-### 6.2 首次安装
-
-首次安装顺序是“驱动 → 固件”：
-
-~~~bash
-cd /opt/ascend-hdk
-./driver.run --full --install-for-all
-./firmware.run --full
-~~~
-
-两条命令都必须明确显示安装成功。随后重启：
-
-~~~bash
-reboot
-~~~
-
-不要在安装完成但尚未重启时安装 Docker 推理服务。
-
-### 6.3 驱动验收
-
-重连服务器后：
-
-~~~bash
-sudo -i
 npu-smi info
 cat /usr/local/Ascend/driver/version.info
 cat /etc/ascend_install.info
-ls -l /dev/davinci* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc
-dmesg -T | grep -i -E 'ascend|davinci|hisi_hdc|devmm' | tail -n 100
+ls -l /dev/davinci[0-3] /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc
 ~~~
 
-在当前硬件上，通常应看到四个逻辑 NPU，例如 <code>/dev/davinci0</code> 至 <code>/dev/davinci3</code>，且所有设备健康。以下任一情况都应先停止部署并修复：
+以下任一情况都必须停止：设备 Health 不为 OK、设备节点缺失、驱动文件缺失，或者内核日志出现持续的 NPU reset、PCIe AER、SMMU、固件错误。
 
-- 只能看到两个而不是四个逻辑 NPU；
-- <code>npu-smi</code> 报错或设备 Health 不正常；
-- 缺少管理设备节点；
-- 内核日志存在反复 reset、PCIe AER、SMMU 或固件错误；
-- 驱动版本不在所用镜像实际 CANN 版本的 HDK 配套表中。
+## 5. 驱动维护边界
 
-保存验收信息：
+当前驱动编译依赖 <code>make</code>、<code>dkms</code>、<code>gcc</code>、精确匹配运行内核的 <code>kernel-headers</code> 与 <code>kernel-devel</code> 均已安装，无需重复执行安装命令。
+
+后续升级驱动或内核前必须重新核对：
+
+- CANN 9.1.0 与 Ascend HDK 的官方配套表；
+- Atlas 300I Duo / Ascend 310P、aarch64、openEuler 和目标内核兼容性；
+- 驱动与固件是否来自同一配套发布；
+- 维护窗口、回退包和 BMC 远程控制是否可用。
+
+驱动/固件升级不是本次容器部署的一部分。不能因为容器预检失败就直接重装驱动；应先核对挂载路径、镜像平台和版本链。
+
+## 6. 数据盘、Docker 与 SELinux 现状
+
+数据盘已经以 XFS 挂载到 <code>/data</code>，<code>/etc/fstab</code> 已通过校验；Docker 的 <code>data-root</code> 已设为 <code>/data/docker</code>，存储驱动为 overlay2，并通过 systemd 的 <code>RequiresMountsFor=/data</code> 保证数据盘先于 Docker 挂载。
+
+Docker 根目录已使用 SELinux 等价映射继承 <code>/var/lib/docker</code> 的标签。模型和日志目录也必须具有容器可访问标签，但不要对 <code>/usr/local/Ascend</code>、<code>/usr/local/dcmi</code> 或设备节点做递归重标记。
 
 ~~~bash
-npu-smi info > /var/log/ascend-install/npu-smi-after.txt
-lspci -nn > /var/log/ascend-install/lspci-after.txt
+semanage fcontext -a -t container_file_t '/data/models(/.*)?'
+semanage fcontext -a -t container_file_t '/data/logs(/.*)?'
+restorecon -Rv /data/models /data/logs
 ~~~
 
-## 7. 安装 Docker
+如果规则已经存在，<code>-a</code> 会提示已定义；把对应一行改为 <code>semanage fcontext -m ...</code> 后重新执行即可。
 
-openEuler 22.03 LTS SP4 可直接安装发行版 Docker 包：
+## 7. 验证 Docker 真实可运行
+
+当前安装的是 openEuler 仓库维护的 Docker 18.09.0 构建。<code>docker info</code> 中显示 <code>runc version: N/A</code> 并不能单独证明运行时故障，必须以实际创建容器的结果为准。
+
+先运行一个小型多架构测试镜像：
 
 ~~~bash
-dnf install -y docker
-systemctl enable --now docker
-docker version
-docker info
+docker run --rm hello-world
 ~~~
 
-创建目录：
+若能看到 <code>Hello from Docker!</code>，说明镜像拉取、aarch64 manifest、overlay2、runc、网络命名空间和容器清理的基本链路均已工作。随后确认根目录和服务日志：
 
 ~~~bash
-install -d -m 750 /data/models
-install -d -m 750 /data/logs/qwen36-a
-df -h /data /var/lib/docker
+docker info --format 'root={{.DockerRootDir}} driver={{.Driver}}'
+systemctl is-active docker
+journalctl -u docker --since '-10 minutes' -p warning --no-pager
 ~~~
 
-如果 <code>/var/lib/docker</code> 所在分区空间不足，应在拉取镜像前，把 Docker data-root 迁移到容量充足的本地磁盘。不要等磁盘写满后再迁移。
+一次性的 <code>Failed to cleanup netns</code> 警告在 daemon 仍为 active、测试容器能正常运行且没有持续重复时，可以先记录并继续；如果每次运行都出现、容器无法删除或网络异常，则应先修复 Docker。
 
 ## 8. 拉取并固定推理镜像
 
 本教程固定使用 openEuler + 310P 专用镜像：
 
 ~~~bash
-export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
+mkdir -p /var/log/ascend-install
 docker pull "$VLLM_IMAGE"
 docker image inspect "$VLLM_IMAGE" \
   --format '{{index .RepoDigests 0}}' \
@@ -283,7 +269,7 @@ docker image inspect "$VLLM_IMAGE" \
 若中国大陆网络无法直接访问 Quay，可按 vLLM Ascend FAQ 使用镜像代理，例如：
 
 ~~~bash
-export VLLM_IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
 docker pull "$VLLM_IMAGE"
 ~~~
 
@@ -294,7 +280,7 @@ docker pull "$VLLM_IMAGE"
 先只映射计划用于首实例的两个 NPU。以下命令暂定 <code>davinci0</code> 和 <code>davinci1</code> 属于同一张物理 Duo 卡；第 11 节启动前必须确认这一点。
 
 ~~~bash
-export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
 
 docker run --rm \
   --name ascend-preflight \
@@ -306,7 +292,7 @@ docker run --rm \
   --device /dev/devmm_svm \
   --device /dev/hisi_hdc \
   -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /usr/local/sbin/npu-smi:/usr/local/bin/npu-smi:ro \
   -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
@@ -347,7 +333,7 @@ Eco-Tech/Qwen3.6-35B-A3B-w8a8
 推荐先下载到主机固定目录，不让生产服务在每次启动时临时下载。使用一次性容器完成下载，避免污染主机 Python：
 
 ~~~bash
-export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
 
 docker run --rm \
   --network host \
@@ -376,33 +362,23 @@ find "$MODEL_DIR" -maxdepth 2 -type f -printf '%P %s bytes\n' \
 
 如果用于生产，建议将模型复制到内部对象存储或制品库，并锁定已经验收的 revision。该 W8A8 权重来自 vLLM Ascend 官方教程指向的 ModelScope 仓库，不应与其他来源的同名量化权重混用。
 
-## 11. 确认物理卡与逻辑设备对应关系
+## 11. 物理卡与逻辑设备对应关系
 
-每个服务实例必须使用同一张物理 Atlas 300I Duo 上的两个 310P 芯片。通常第一张卡对应逻辑设备 0、1，第二张卡对应 2、3，但不能只凭编号假设。
-
-结合以下信息确认设备的 PCIe Bus-Id 和槽位归属：
-
-~~~bash
-npu-smi info
-lspci -tv
-lspci -nn
-~~~
-
-必要时通过服务器 BMC、整机厂商 PCIe 槽位映射表或华为运维工具确认。后文假定：
+现场 PCIe 与 <code>npu-smi</code> 输出已经确认当前映射：
 
 ~~~text
-物理卡 A：/dev/davinci0、/dev/davinci1
-物理卡 B：/dev/davinci2、/dev/davinci3
+物理卡 A：0000:01:00.0，PCIe Gen4 x16，/dev/davinci0、/dev/davinci1
+物理卡 B：0000:03:00.0，PCIe Gen4 x8（downgraded），/dev/davinci2、/dev/davinci3
 ~~~
 
-如果实际映射不同，必须同步修改 <code>--device</code> 和 <code>ASCEND_RT_VISIBLE_DEVICES</code>。
+首实例固定使用物理卡 A 的 <code>davinci0,1</code>。这既保证 TP=2 位于同一张 Duo 卡，也避开第二张卡当前的 x8 降级链路。第二张卡在后续使用前，应结合服务器槽位规格、转接板/背板和 BMC 告警确认 x8 是否为该槽位的设计状态；不要为了首实例而移动硬件。
 
 ## 12. 启动 Qwen3.6 首实例
 
 以下参数是 Atlas 300I Duo 的稳健起点，并与 vLLM Ascend v0.23.0 官方模型教程保持一致。
 
 ~~~bash
-export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
 
 docker run -d \
   --name qwen36-a \
@@ -417,7 +393,7 @@ docker run -d \
   --device /dev/devmm_svm \
   --device /dev/hisi_hdc \
   -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /usr/local/sbin/npu-smi:/usr/local/bin/npu-smi:ro \
   -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
@@ -616,7 +592,7 @@ docker stats --no-stream qwen36-a
 
 ~~~bash
 install -d -m 750 /data/logs/qwen36-b
-export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0rc1-310p-openeuler
+export VLLM_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler
 
 docker run -d \
   --name qwen36-b \
@@ -631,7 +607,7 @@ docker run -d \
   --device /dev/devmm_svm \
   --device /dev/hisi_hdc \
   -v /usr/local/dcmi:/usr/local/dcmi:ro \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /usr/local/sbin/npu-smi:/usr/local/bin/npu-smi:ro \
   -v /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro \
   -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
   -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
@@ -763,16 +739,17 @@ journalctl -k -g 'Out of memory|Killed process' --since '-1 hour'
 
 ## 20. 最终验收清单
 
-- [ ] 系统为 openEuler 22.03 LTS SP4 aarch64
-- [ ] 当前内核与 kernel-devel/kernel-headers 完全匹配
+- [x] 系统为 openEuler 22.03 LTS SP4 aarch64
+- [x] 当前内核与 kernel-devel/kernel-headers 完全匹配
 - [ ] HDK 驱动与固件来自 CANN 9.1.0 配套表
-- [ ] 首次安装按“驱动 → 固件”完成并重启
-- [ ] <code>npu-smi info</code> 显示四个健康逻辑 NPU
-- [ ] Docker 开机自启
-- [ ] 镜像为固定的 <code>v0.23.0rc1-310p-openeuler</code>，已记录 digest
-- [ ] 模型为 <code>Eco-Tech/Qwen3.6-35B-A3B-w8a8</code>，已记录文件清单/revision
-- [ ] 首实例只占用同一张物理 Duo 卡的两个芯片
-- [ ] <code>/health</code>、<code>/v1/models</code>、Completions、Chat Completions 均通过
+- [x] 预装 HDK 驱动和固件已验收，四个逻辑 NPU 均健康
+- [x] <code>npu-smi info</code> 显示四个健康逻辑 NPU
+- [x] Docker 开机自启
+- [ ] 镜像为固定的 <code>v0.23.0-310p-openeuler</code>，已记录 digest
+- [x] 模型为 <code>Eco-Tech/Qwen3.6-35B-A3B-w8a8</code>，10 个权重分片和索引完整
+- [x] 首实例只占用同一张物理 Duo 卡的 <code>davinci0,1</code>，TP=2
+- [x] <code>/health</code>、<code>/v1/models</code>、Chat Completions 和图片输入均通过
+- [ ] Compose 双实例、NUMA CPU 亲和与 Nginx 网关通过压力验收
 - [ ] 重启容器后可恢复
 - [ ] 重启服务器后驱动、Docker、模型服务可恢复
 - [ ] 稳态无 swap、无 OOM、无 NPU reset
@@ -793,4 +770,4 @@ journalctl -k -g 'Out of memory|Killed process' --since '-1 hour'
 
 ---
 
-此文档的版本链按 2026-08-12 可查询到的官方资料固定。后续升级时，不应只替换容器 tag，而应重新核对“模型 → vLLM Ascend → vLLM/PyTorch/TorchNPU → CANN → HDK 驱动/固件 → OS/内核”的整条兼容关系。
+此文档的版本链按 2026-08-18 可查询到的官方资料和当前服务器实测输出固定。后续升级时，不应只替换容器 tag，而应重新核对“模型 → vLLM Ascend → vLLM/PyTorch/TorchNPU → CANN → HDK 驱动/固件 → OS/内核”的整条兼容关系。
