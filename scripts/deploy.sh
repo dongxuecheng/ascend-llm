@@ -76,7 +76,11 @@ for name in qwen36-a qwen36-b qwen36-gateway; do
   docker rm "$name"
 done
 
-compose config >/dev/null
+if [ "$mode" = "dual" ]; then
+  compose_dual config >/dev/null
+else
+  compose config >/dev/null
+fi
 
 if [ "$mode" = "dual" ] && ! docker image inspect "$NGINX_IMAGE" >/dev/null 2>&1; then
   docker pull "$NGINX_IMAGE"
@@ -100,11 +104,11 @@ if [ "$mem_available_kib" -lt "$min_available_kib" ]; then
 fi
 
 echo "===== Start qwen36-b on davinci2,3 ====="
-compose up -d qwen36-b
+  compose_dual up -d qwen36-b
 wait_for_health qwen36-b 900
 
 echo "===== Start local Nginx gateway ====="
-compose up -d gateway
+compose_dual up -d gateway
 wait_for_health qwen36-gateway 120
 
 curl -fsS http://127.0.0.1:8000/health >/dev/null

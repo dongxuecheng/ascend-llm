@@ -9,4 +9,4 @@ require_root
 load_env
 detect_compose
 
-compose down --remove-orphans
+compose_dual down --remove-orphans

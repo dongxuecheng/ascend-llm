@@ -8,24 +8,25 @@
 
 本文从一台刚安装完 openEuler 22.03 LTS SP4 的服务器开始，完成系统检查、Atlas 驱动与固件、Docker、模型权重以及 vLLM Ascend 服务部署。
 
-## Docker Compose 双实例快速部署（推荐）
+## Docker Compose 单实例快速部署（当前推荐）
 
-仓库已经包含可直接部署的生产基线：
+默认的 `docker-compose.yml` 只定义一个模型实例：
 
 ~~~text
-Nginx 127.0.0.1:8000
-├── qwen36-a 127.0.0.1:8080 → davinci0,1 → TP=2
-└── qwen36-b 127.0.0.1:8081 → davinci2,3 → TP=2
+qwen36-a 127.0.0.1:8080 → davinci0,1 → TP=2
 ~~~
+
+因此标准命令 `docker compose up -d` 只会使用第一张物理 Atlas 300I Duo，第二张卡保持空闲，不会启动第二个模型和 Nginx。
 
 主要文件：
 
 ~~~text
-docker-compose.yml          两个 vLLM 实例和本地 Nginx 网关
+docker-compose.yml          默认单实例 qwen36-a
+docker-compose.dual.yml     可选的第二实例和 Nginx 网关
 .env.example                镜像、模型、上下文和内存保护参数
 nginx/default.conf.template least_conn 负载均衡和流式代理配置
 scripts/preflight.sh        模型、驱动、设备、NUMA 和 Compose 预检
-scripts/deploy.sh           自动 NUMA CPU 亲和、顺序冷启动和内存闸门
+scripts/deploy.sh           可选的自动化启动工具；不是启动服务的必需项
 scripts/status.sh           容器、API、内存和 NPU 状态
 scripts/logs.sh             跟踪指定容器日志
 scripts/smoke-test.sh        OpenAI Chat Completions 冒烟测试
@@ -33,55 +34,101 @@ scripts/image-test.sh        图片识别端到端验收
 scripts/down.sh              停止并删除本项目容器
 ~~~
 
-如果服务器还没有 Compose，openEuler 22.03 可以从已配置的软件仓库安装：
+先确认 `docker compose` 子命令可用：
 
 ~~~bash
-dnf install -y docker-compose
-docker-compose version
+docker compose version
 ~~~
 
-脚本同时兼容 `docker compose` 插件和 `docker-compose` 独立命令。进入上传或克隆好的项目目录后执行：
+进入项目目录，创建环境文件和持久化目录：
 
 ~~~bash
 sudo -i
 cd /data/packages/ascend-llm
 cp .env.example .env
-chmod +x scripts/*.sh
-./scripts/preflight.sh
+mkdir -p /data/logs/qwen36-a /data/cache/qwen36-a
+
+CARD_A_NODE=$(cat /sys/bus/pci/devices/0000:01:00.0/numa_node)
+CARD_A_CPUS=$(cat "/sys/devices/system/node/node${CARD_A_NODE}/cpulist")
+sed -i "s/^CPUSET_A=.*/CPUSET_A=${CARD_A_CPUS}/" .env
+echo "card_a_numa=${CARD_A_NODE} cpus=${CARD_A_CPUS}"
 ~~~
 
-`.env` 默认保持网关只监听本机。`deploy.sh` 会读取两张卡的 PCIe NUMA 节点，并把每个实例限制在对应 NUMA CPU 集合中。不要在没有鉴权和 TLS 的情况下把 `GATEWAY_LISTEN` 改成 `0.0.0.0:8000`。
+这会把第一张卡所在 NUMA 节点的 CPU 列表写入 `.env`，Compose 随后通过 `cpuset` 使用该列表，修复此前容器 CPU 允许列表与 NPU NUMA 亲和不一致的问题。
 
-从此前手工创建的 `qwen36-a` 容器迁移到 Compose，并启动双实例：
+SELinux 为 Enforcing 时，给缓存目录配置持久标签；日志目录已有相同规则时，`-a` 报“已定义”可以忽略：
 
 ~~~bash
-./scripts/deploy.sh dual --replace-existing
+semanage fcontext -a -t container_file_t '/data/cache(/.*)?' 2>/dev/null || \
+  semanage fcontext -m -t container_file_t '/data/cache(/.*)?'
+restorecon -Rv /data/cache /data/logs/qwen36-a
 ~~~
 
-`--replace-existing` 只删除同名旧容器，不删除镜像、模型或 `/data` 数据；删除前会把旧容器的 `inspect` 和日志保存到 `/data/logs/compose-migration-<时间>`。两个约 38GB 的实例会顺序启动，第一实例健康且主机可用内存仍不少于 48GiB 时才启动第二实例。每个实例首次冷启动最长允许 15 分钟。
+### 第一次从 docker run 切换到 Compose
 
-部署完成后：
+“手工创建的 `qwen36-a`”是指它由 `docker run --name qwen36-a ...` 创建，而不是由 Compose 创建。检查其 Compose 项目标签：
 
 ~~~bash
-./scripts/status.sh
-./scripts/smoke-test.sh
-./scripts/image-test.sh /data/test.jpg
+docker inspect qwen36-a \
+  --format '{{json .Config.Labels}}'
 ~~~
 
-应用统一访问：
+如果输出为 `null`、`{}`，或者其中没有 `com.docker.compose.project`，它就是 `docker run` 容器。Compose 不能接管一个已经存在的同名容器，需要做一次迁移：
+
+~~~bash
+mkdir -p /data/logs/compose-migration
+docker inspect qwen36-a > /data/logs/compose-migration/qwen36-a-inspect.json
+docker logs qwen36-a > /data/logs/compose-migration/qwen36-a.log 2>&1 || true
+docker stop -t 120 qwen36-a
+docker rm qwen36-a
+~~~
+
+这里只删除旧容器本身，不会删除推理镜像、`/data/models` 模型或其他 `/data` 数据。该迁移只做一次。
+
+### 使用标准 Compose 命令启动
+
+~~~bash
+docker compose config
+docker compose up -d
+docker compose ps
+docker compose logs -f --tail 200 qwen36-a
+~~~
+
+首次加载模型需要数分钟。另开一个 SSH 终端查看健康状态：
+
+~~~bash
+docker inspect qwen36-a \
+  --format 'status={{.State.Status}} health={{.State.Health.Status}}'
+
+curl -i http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/v1/models
+~~~
+
+停止、重新启动和更新配置均使用标准 Compose 命令：
+
+~~~bash
+docker compose stop
+docker compose start
+docker compose restart qwen36-a
+docker compose down
+~~~
+
+单实例 API 地址：
 
 ~~~text
-http://127.0.0.1:8000/v1
+http://127.0.0.1:8080/v1
 ~~~
 
-如果第二张卡或 128GB 主机内存无法通过双实例验收，可回退到单实例：
+后续确实需要双实例时，再显式叠加可选配置文件；不要在当前阶段执行：
 
 ~~~bash
-./scripts/down.sh
-./scripts/deploy.sh single
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.dual.yml \
+  up -d
 ~~~
 
-单实例直接访问 `http://127.0.0.1:8080/v1`。脚本不会把一个请求拆到两张物理卡上；双实例提高的是并发吞吐和可用性，单请求延迟仍由单个 TP=2 实例决定。
+此时才会增加 `qwen36-b` 和 `qwen36-gateway`。双实例提高的是并发吞吐，不会降低当前单个请求的 TP=2 延迟。
 
 ## 1. 最终方案
 
@@ -95,18 +142,18 @@ http://127.0.0.1:8000/v1
 | 推理镜像 | <code>quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler</code> |
 | 容器内软件 | 由镜像整体锁定；vLLM 0.23.0、vLLM Ascend 0.23.0，CANN/TorchNPU 以镜像实测输出为准 |
 | 模型 | <code>Eco-Tech/Qwen3.6-35B-A3B-w8a8</code> |
-| 部署拓扑 | 每张物理 Atlas 300I Duo 启动一个 TP=2 副本，共两个副本 |
-| API | 两个后端监听 <code>127.0.0.1:8080/8081</code>，Nginx 统一监听 <code>127.0.0.1:8000</code> |
+| 默认部署拓扑 | 第一张物理 Atlas 300I Duo 启动一个 TP=2 副本 |
+| API | 单实例监听 <code>127.0.0.1:8080</code> |
 
-Atlas 300I Duo 每张物理卡包含两个 Ascend 310P 芯片，96GB 是整张卡的总显存。两张物理卡形成四个逻辑 NPU 设备。每个模型副本只使用同一张物理卡内的两个芯片，避免单个请求跨物理卡执行 TP=4；两个副本由本地 Nginx 按最少连接数分发请求。
+Atlas 300I Duo 每张物理卡包含两个 Ascend 310P 芯片，96GB 是整张卡的总显存。两张物理卡形成四个逻辑 NPU 设备。默认副本只使用第一张物理卡内的两个芯片，避免单个请求跨物理卡执行 TP=4；第二张物理卡暂时空闲。
 
-128GB 主机内存已经验证首实例运行后仍有约 100GiB 可用。双实例采用顺序冷启动和 48GiB 可用内存闸门；若现场压力测试出现持续 swap、OOM 或可用内存低于 20GiB，应立即回退单实例，生产双实例仍建议升级到 256GB。因此本教程：
+128GB 主机内存已经验证首实例运行后仍有约 100GiB 可用，当前单实例部署具有足够余量。因此本教程：
 
 - 不使用 CPU offload；
-- 不同时冷启动两个实例；
+- 只启动一个模型实例；
 - 使用 W8A8 权重；
 - 初始上下文固定为 20,480 token；
-- 每实例最大活跃序列数为 8，双实例合计为 16；
+- 最大活跃序列数为 8；
 - 默认关闭前缀缓存和 MTP 推测解码。
 
 截至文档基线日期，vLLM Ascend 官方安装页已经提供稳定版 <code>v0.23.0-310p-openeuler</code>，因此不再使用早期的 <code>v0.23.0rc1</code>。即便使用稳定版，正式上线前仍应完成至少 24 小时稳定性、精度和压力验收，不能把“成功启动”视为生产验收完成。

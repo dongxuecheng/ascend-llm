@@ -41,8 +41,10 @@ load_env() {
 detect_compose() {
   if docker compose version >/dev/null 2>&1; then
     COMPOSE=(docker compose -f "$PROJECT_DIR/docker-compose.yml")
+    COMPOSE_DUAL=(docker compose -f "$PROJECT_DIR/docker-compose.yml" -f "$PROJECT_DIR/docker-compose.dual.yml")
   elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE=(docker-compose -f "$PROJECT_DIR/docker-compose.yml")
+    COMPOSE_DUAL=(docker-compose -f "$PROJECT_DIR/docker-compose.yml" -f "$PROJECT_DIR/docker-compose.dual.yml")
   else
     die "未找到 docker compose 或 docker-compose"
   fi
@@ -50,6 +52,10 @@ detect_compose() {
 
 compose() {
   (cd "$PROJECT_DIR" && "${COMPOSE[@]}" "$@")
+}
+
+compose_dual() {
+  (cd "$PROJECT_DIR" && "${COMPOSE_DUAL[@]}" "$@")
 }
 
 numa_node_for_bdf() {

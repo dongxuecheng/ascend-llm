@@ -85,7 +85,9 @@ fi
 
 echo "===== Compose config ====="
 compose config >/dev/null
-echo "compose_config=OK"
+compose_dual config >/dev/null
+echo "compose_single_config=OK"
+echo "compose_dual_config=OK"
 
 echo "===== Existing containers and ports ====="
 docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'

@@ -9,7 +9,7 @@ require_root
 load_env
 detect_compose
 
-compose ps
+compose_dual ps
 
 for endpoint in \
   http://127.0.0.1:8080/health \

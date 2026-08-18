@@ -1,17 +1,17 @@
 version: "2.4"
 
 services:
-  qwen36-a:
+  qwen36-b:
     image: "${VLLM_IMAGE}"
-    container_name: qwen36-a
+    container_name: qwen36-b
     restart: unless-stopped
     network_mode: host
     shm_size: 10g
-    cpuset: "${CPUSET_A:-0-31}"
+    cpuset: "${CPUSET_B:-32-63}"
     stop_grace_period: 2m
     devices:
-      - /dev/davinci0:/dev/davinci0
-      - /dev/davinci1:/dev/davinci1
+      - /dev/davinci2:/dev/davinci2
+      - /dev/davinci3:/dev/davinci3
       - /dev/davinci_manager:/dev/davinci_manager
       - /dev/devmm_svm:/dev/devmm_svm
       - /dev/hisi_hdc:/dev/hisi_hdc
@@ -22,10 +22,10 @@ services:
       - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
       - ${MODEL_DIR}:/models/Qwen3.6-35B-A3B-w8a8:ro
-      - ${LOG_ROOT}/qwen36-a:/logs
-      - ${CACHE_ROOT}/qwen36-a:/root/.cache
+      - ${LOG_ROOT}/qwen36-b:/logs
+      - ${CACHE_ROOT}/qwen36-b:/root/.cache
     environment:
-      ASCEND_RT_VISIBLE_DEVICES: "0,1"
+      ASCEND_RT_VISIBLE_DEVICES: "2,3"
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
@@ -37,7 +37,7 @@ services:
       - --host
       - 127.0.0.1
       - --port
-      - "8080"
+      - "8081"
       - --tensor-parallel-size
       - "2"
       - --gpu-memory-utilization
@@ -64,7 +64,7 @@ services:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=5)
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/health", timeout=5)
       interval: 15s
       timeout: 8s
       retries: 20
@@ -74,3 +74,32 @@ services:
       options:
         max-size: 100m
         max-file: "5"
+
+  gateway:
+    image: "${NGINX_IMAGE:-nginx:1.28-alpine}"
+    container_name: qwen36-gateway
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      qwen36-a:
+        condition: service_healthy
+      qwen36-b:
+        condition: service_healthy
+    environment:
+      GATEWAY_LISTEN: "${GATEWAY_LISTEN:-127.0.0.1:8000}"
+      NGINX_ENVSUBST_FILTER: GATEWAY_LISTEN
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:8000/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"
