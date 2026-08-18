@@ -1,9 +1,7 @@
-version: "2.4"
-
 services:
-  qwen36-a:
-    image: "${VLLM_IMAGE}"
-    container_name: qwen36-a
+  qwen27b:
+    image: "${VLLM_IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler}"
+    container_name: qwen36-27b
     restart: unless-stopped
     network_mode: host
     shm_size: 10g
@@ -21,9 +19,8 @@ services:
       - /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro
       - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
-      - ${MODEL_DIR}:/models/Qwen3.6-35B-A3B-w8a8:ro
-      - ${LOG_ROOT}/qwen36-a:/logs
-      - ${CACHE_ROOT}/qwen36-a:/root/.cache
+      - ${QWEN27_MODEL_DIR:-/data/models/Qwen3.6-27B-W8A8-310P}:/models/qwen:ro
+      - ${CACHE_ROOT:-/data/cache}/qwen36-27b:/root/.cache:Z
     environment:
       ASCEND_RT_VISIBLE_DEVICES: "0,1"
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -33,7 +30,7 @@ services:
     command:
       - vllm
       - serve
-      - /models/Qwen3.6-35B-A3B-w8a8
+      - /models/qwen
       - --host
       - 127.0.0.1
       - --port
@@ -47,13 +44,16 @@ services:
       - --max-num-batched-tokens
       - "${MAX_NUM_BATCHED_TOKENS:-4096}"
       - --served-model-name
-      - "${MODEL_NAME:-qwen3.6}"
+      - "${QWEN27_MODEL_NAME:-qwen3.6-27b}"
       - --dtype
+      - float16
+      - --mamba-ssm-cache-dtype
       - float16
       - --quantization
       - ascend
       - --max-model-len
-      - "${MAX_MODEL_LEN:-20480}"
+      - "${QWEN27_MAX_MODEL_LEN:-20480}"
+      - --trust-remote-code
       - --no-enable-prefix-caching
       - --additional-config
       - '{"ascend_compilation_config":{"enable_npugraph_ex":false},"enable_cpu_binding":true}'

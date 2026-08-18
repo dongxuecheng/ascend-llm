@@ -1,40 +1,52 @@
 # Ascend LLM
 
-在 openEuler 22.03 LTS SP4、鲲鹏 920 和 Atlas 300I Duo 上，使用 Docker Compose 运行 <code>Qwen3.6-35B-A3B-W8A8</code>。
+使用 Docker Compose 在 Atlas 300I Duo 上分别测试：
 
-项目提供 OpenAI 兼容 API，默认只启动一个模型实例：
+- Qwen3.6-35B-A3B-W8A8；
+- Qwen3.6-27B-W8A8-310P。
 
-~~~text
-qwen36-a
-├── NPU：/dev/davinci0、/dev/davinci1
-├── 并行：TP=2
-├── 模型：/data/models/Qwen3.6-35B-A3B-w8a8
-└── API：http://127.0.0.1:8080/v1
-~~~
+两个模型使用相同的 NPU、端口和调度参数，以便进行公平的 A/B 测试。
 
-第二张 Atlas 300I Duo 默认不使用。
+| 模型 | Compose 文件 | NPU | API |
+|---|---|---|---|
+| Qwen3.6-35B-A3B-W8A8 | <code>docker-compose.qwen35b-a3b.yml</code> | <code>davinci0,1</code> | <code>127.0.0.1:8080</code> |
+| Qwen3.6-27B-W8A8-310P | <code>docker-compose.qwen27b.yml</code> | <code>davinci0,1</code> | <code>127.0.0.1:8080</code> |
+
+两者不能同时启动。测试另一个模型前，必须先停止当前模型。
 
 ## 前置条件
 
-启动前应已满足：
-
-- Ascend 驱动工作正常，<code>npu-smi info</code> 能看到健康设备；
-- Docker 服务正在运行；
+- <code>npu-smi info</code> 显示 NPU 健康；
 - <code>docker compose version</code> 可以正常执行；
-- 推理镜像已经拉取：<code>quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler</code>；
-- 模型位于：<code>/data/models/Qwen3.6-35B-A3B-w8a8</code>；
-- 当前没有其他容器占用名称 <code>qwen36-a</code> 或端口 <code>8080</code>。
+- 已有推理镜像：
+  <code>quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler</code>；
+- 两个模型已经放入 <code>/data/models</code>；
+- 端口 <code>8080</code> 未被其他程序占用。
+
+如果此前的 <code>qwen36-a</code> 仍在运行，先停止并删除旧容器：
+
+~~~bash
+docker stop -t 120 qwen36-a
+docker rm qwen36-a
+~~~
+
+这不会删除模型和推理镜像。
 
 ## 配置
-
-进入项目目录并创建本地配置：
 
 ~~~bash
 cd /data/packages/ascend-llm
 cp -n .env.example .env
 ~~~
 
-根据第一张卡的 NUMA 节点设置 CPU 亲和：
+确认并根据实际目录修改：
+
+~~~env
+QWEN35_MODEL_DIR=/data/models/Qwen3.6-35B-A3B-w8a8
+QWEN27_MODEL_DIR=/data/models/Qwen3.6-27B-W8A8-310P
+~~~
+
+设置第一张 Atlas 300I Duo 对应的 NUMA CPU：
 
 ~~~bash
 CARD_A_NODE=$(cat /sys/bus/pci/devices/0000:01:00.0/numa_node)
@@ -44,187 +56,195 @@ sed -i "s/^CPUSET_A=.*/CPUSET_A=$CARD_A_CPUS/" .env
 echo "card_a_numa=$CARD_A_NODE cpus=$CARD_A_CPUS"
 ~~~
 
-常用参数位于 <code>.env</code>：
-
-| 参数 | 默认值 | 说明 |
-|---|---:|---|
-| <code>VLLM_IMAGE</code> | <code>v0.23.0-310p-openeuler</code> | vLLM Ascend 310P 镜像 |
-| <code>MODEL_DIR</code> | <code>/data/models/Qwen3.6-35B-A3B-w8a8</code> | 主机模型目录 |
-| <code>MODEL_NAME</code> | <code>qwen3.6</code> | API 模型名称 |
-| <code>CPUSET_A</code> | 自动填写 | 第一张卡对应的 NUMA CPU |
-| <code>MAX_MODEL_LEN</code> | <code>20480</code> | 最大上下文长度 |
-| <code>MAX_NUM_SEQS</code> | <code>8</code> | 最大活跃请求数 |
-| <code>MAX_NUM_BATCHED_TOKENS</code> | <code>4096</code> | 单次调度的 token 上限 |
-| <code>GPU_MEMORY_UTILIZATION</code> | <code>0.90</code> | NPU 显存使用比例 |
-
-## 启动
-
-确认默认 Compose 文件只包含一个服务：
+创建两个独立缓存目录：
 
 ~~~bash
-docker compose config --services
+mkdir -p /data/cache/qwen36-35b-a3b /data/cache/qwen36-27b
 ~~~
 
-预期输出：
+Compose 会通过卷参数 <code>:Z</code> 为两个独立缓存目录设置容器可访问的 SELinux 标签。
 
-~~~text
-qwen36-a
-~~~
+## 测试 Qwen3.6-35B-A3B-W8A8
 
-启动模型：
+启动：
 
 ~~~bash
-docker compose up -d
+docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml up -d
 ~~~
 
-查看状态和加载日志：
+查看状态和日志：
 
 ~~~bash
-docker compose ps
-docker compose logs -f --tail 200 qwen36-a
+docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml ps
+
+docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml logs -f --tail 200
 ~~~
 
-首次加载需要数分钟。容器健康后执行：
+健康检查：
 
 ~~~bash
 curl -i http://127.0.0.1:8080/health
 curl -sS http://127.0.0.1:8080/v1/models
 ~~~
 
-如果提示容器名 <code>qwen36-a</code> 已被占用，说明存在之前通过 <code>docker run</code> 创建的同名容器。先确认并删除旧容器，再重新执行 <code>docker compose up -d</code>：
+停止：
 
 ~~~bash
-docker ps -a --filter 'name=^/qwen36-a$'
-docker stop -t 120 qwen36-a
-docker rm qwen36-a
-docker compose up -d
+docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml down
 ~~~
 
-删除旧容器不会删除推理镜像和 <code>/data/models</code> 中的模型。
+## 测试 Qwen3.6-27B-W8A8-310P
 
-## API 使用
-
-### 文本请求
+确认 35B 模型已经停止，然后启动：
 
 ~~~bash
-curl --max-time 600 -sS \
-  http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  --data-binary '{
-    "model": "qwen3.6",
-    "messages": [
+docker compose -p qwen27b -f docker-compose.qwen27b.yml up -d
+~~~
+
+查看状态和日志：
+
+~~~bash
+docker compose -p qwen27b -f docker-compose.qwen27b.yml ps
+
+docker compose -p qwen27b -f docker-compose.qwen27b.yml logs -f --tail 200
+~~~
+
+健康检查：
+
+~~~bash
+curl -i http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/v1/models
+~~~
+
+停止：
+
+~~~bash
+docker compose -p qwen27b -f docker-compose.qwen27b.yml down
+~~~
+
+## 文本请求
+
+测试 35B 时：
+
+~~~bash
+MODEL_NAME=qwen3.6-35b-a3b
+~~~
+
+测试 27B 时：
+
+~~~bash
+MODEL_NAME=qwen3.6-27b
+~~~
+
+发送请求：
+
+~~~bash
+curl --max-time 600 -sS -o /tmp/qwen-response.json -w 'http_code=%{http_code} total=%{time_total}s\n' http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' --data-binary "{
+    \"model\": \"$MODEL_NAME\",
+    \"messages\": [
       {
-        "role": "user",
-        "content": "请简要介绍这台昇腾推理服务器。"
+        \"role\": \"user\",
+        \"content\": \"请用三句话说明图片识别模型应该如何避免产生幻觉。\"
       }
     ],
-    "max_tokens": 256,
-    "temperature": 0,
-    "chat_template_kwargs": {
-      "enable_thinking": false
+    \"max_tokens\": 256,
+    \"temperature\": 0,
+    \"chat_template_kwargs\": {
+      \"enable_thinking\": false
     }
-  }'
+  }"
+
+python3 -m json.tool /tmp/qwen-response.json
 ~~~
 
-是否启用 Thinking 由每次请求的 <code>chat_template_kwargs.enable_thinking</code> 决定。
+## 图片请求
 
-### 图片识别
-
-仓库提供图片请求测试工具，支持 JPEG、PNG 和 WebP：
+先根据当前模型设置 <code>MODEL_NAME</code>，然后执行：
 
 ~~~bash
-QWEN_ENDPOINT=http://127.0.0.1:8080 \
-  ./scripts/image-test.sh /data/test.jpg
+IMAGE=/data/test.jpg
+MIME=$(file -b --mime-type "$IMAGE")
+
+curl --max-time 600 -sS -o /tmp/qwen-image-response.json -w 'http_code=%{http_code} total=%{time_total}s\n' http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' --data-binary @- <<EOF
+{
+  "model": "$MODEL_NAME",
+  "messages": [
+    {
+      "role": "system",
+      "content": "只能根据图片中实际可见的内容回答，无法确认的内容必须明确说明。"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:$MIME;base64,$(base64 -w0 "$IMAGE")"
+          }
+        },
+        {
+          "type": "text",
+          "text": "请识别图片中的主要物体、文字、场景和无法确认的内容。"
+        }
+      ]
+    }
+  ],
+  "max_tokens": 512,
+  "temperature": 0,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}
+EOF
+
+python3 -m json.tool /tmp/qwen-image-response.json
 ~~~
 
-### OpenAI 客户端参数
+## 公平测试原则
 
-接入兼容 OpenAI API 的应用时使用：
+测试两个模型时应保持以下条件完全一致：
+
+- 使用同一张图片和相同提示词；
+- 使用同一组 <code>davinci0,1</code>；
+- 保持 <code>MAX_MODEL_LEN=20480</code>；
+- 保持 <code>MAX_NUM_SEQS=8</code>；
+- 保持 <code>MAX_NUM_BATCHED_TOKENS=4096</code>；
+- 保持 <code>GPU_MEMORY_UTILIZATION=0.90</code>；
+- 保持 Thinking 关闭；
+- 每个模型先预热至少三次，再记录测试结果；
+- 不把首次模型加载和首次图编译时间计入稳定性能结果。
+
+建议记录：
+
+- 图片识别结果和幻觉情况；
+- 总响应时间；
+- 首 token 延迟；
+- 输出 token 数和生成速度；
+- NPU 显存与利用率；
+- 容器主机内存占用；
+- 连续请求是否出现错误。
+
+## 两份配置的差异
+
+35B-A3B 是稀疏 MoE 模型，27B 是 Dense Hybrid 模型。两份 YAML 的公共配置保持一致；27B 配置额外包含：
 
 ~~~text
-base_url = http://127.0.0.1:8080/v1
-model    = qwen3.6
+--mamba-ssm-cache-dtype float16
+--trust-remote-code
 ~~~
 
-服务默认只监听本机回环地址。需要远程访问时，应在前面增加带鉴权和 TLS 的反向代理，不建议直接让 vLLM 监听公网地址。
+为了建立公平的基础性能结果，27B 默认没有启用 MTP 推测解码。完成基线测试后，再单独测试 MTP：
 
-## 日常管理
-
-~~~bash
-# 查看容器
-docker compose ps
-
-# 查看日志
-docker compose logs -f --tail 200 qwen36-a
-
-# 查看 NPU
-npu-smi info
-
-# 查看资源占用
-docker stats --no-stream qwen36-a
-
-# 重启
-docker compose restart qwen36-a
-
-# 停止但保留容器
-docker compose stop
-
-# 启动已停止的容器
-docker compose start
-
-# 停止并删除项目容器
-docker compose down
+~~~text
+--speculative-config
+{"method":"qwen3_5_mtp","num_speculative_tokens":1}
 ~~~
-
-<code>docker compose down</code> 不会删除模型目录和推理镜像。
-
-## 可选双实例
-
-默认不要使用第二实例。需要提高并发吞吐时，可叠加 <code>docker-compose.dual.yml</code>：
-
-~~~bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.dual.yml \
-  up -d
-~~~
-
-双实例模式增加：
-
-- <code>qwen36-b</code>：使用 <code>davinci2,3</code>，监听 <code>127.0.0.1:8081</code>；
-- <code>qwen36-gateway</code>：Nginx 负载均衡，监听 <code>127.0.0.1:8000</code>。
-
-当前 128GB 主机优先使用默认单实例。启用双实例前应单独完成内存、并发和稳定性测试。
-
-## 当前推理配置
-
-默认 Compose 配置采用：
-
-- Atlas 300I Duo 同一张物理卡内 TP=2；
-- Ascend W8A8 量化；
-- <code>float16</code> 执行路径；
-- <code>gpu-memory-utilization=0.90</code>；
-- 最大上下文 20,480 token；
-- Full Decode ACLGraph，捕获大小 <code>[1,8]</code>；
-- 关闭 310P 不支持的 NPUGraph Ex；
-- 默认关闭前缀缓存；
-- 按 NPU 所在 NUMA 节点限制容器 CPU；
-- API 只监听 <code>127.0.0.1</code>。
-
-该配置以稳定、低并发图片识别和通用问答为目标。实际最优参数取决于图片分辨率、输入输出长度、并发量和延迟目标，应使用真实业务数据测试后再调整。
-
-参考：
-
-- [vLLM Ascend：Qwen3.6-35B-A3B](https://docs.vllm.ai/projects/ascend/en/main/tutorials/models/Qwen3.6-35B-A3B.html)
-- [vLLM Ascend：Supported Models](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)
 
 ## 项目文件
 
 ~~~text
-docker-compose.yml          默认单实例
-docker-compose.dual.yml     可选双实例和 Nginx
-.env.example                运行参数
-nginx/                      双实例负载均衡配置
-scripts/image-test.sh       图片识别测试
-scripts/smoke-test.sh       文本测试
+docker-compose.qwen35b-a3b.yml  Qwen3.6-35B-A3B-W8A8
+docker-compose.qwen27b.yml      Qwen3.6-27B-W8A8-310P
+.env.example                    公共路径和测试参数
+README.md                       启动、调用和测试说明
 ~~~
