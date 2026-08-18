@@ -46,38 +46,24 @@ QWEN35_MODEL_DIR=/data/models/Qwen3.6-35B-A3B-w8a8
 QWEN27_MODEL_DIR=/data/models/Qwen3.6-27B-W8A8-310P
 ~~~
 
-设置第一张 Atlas 300I Duo 对应的 NUMA CPU：
+两份 YAML 已把第一张 Atlas 300I Duo 对应的 CPU 固定为 <code>0-31</code>。模型缓存使用两个独立的 Docker 命名卷，由 Docker 自动创建、持久化并处理 SELinux，无需手工创建缓存目录。
 
-~~~bash
-CARD_A_NODE=$(cat /sys/bus/pci/devices/0000:01:00.0/numa_node)
-CARD_A_CPUS=$(cat "/sys/devices/system/node/node$CARD_A_NODE/cpulist")
-
-sed -i "s/^CPUSET_A=.*/CPUSET_A=$CARD_A_CPUS/" .env
-echo "card_a_numa=$CARD_A_NODE cpus=$CARD_A_CPUS"
-~~~
-
-创建两个独立缓存目录：
-
-~~~bash
-mkdir -p /data/cache/qwen36-35b-a3b /data/cache/qwen36-27b
-~~~
-
-Compose 会通过卷参数 <code>:Z</code> 为两个独立缓存目录设置容器可访问的 SELinux 标签。
+命令不使用 <code>-p</code>。Compose 会默认使用项目目录名 <code>ascend-llm</code> 作为项目名；两个模型轮流运行且服务名、容器名和缓存卷名均不同，因此不需要额外指定项目名。若以后移动加速卡或改变 PCIe 槽位，应重新确认 NUMA 拓扑并更新 YAML 中的 <code>cpuset</code>。
 
 ## 测试 Qwen3.6-35B-A3B-W8A8
 
 启动：
 
 ~~~bash
-docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml up -d
+docker compose -f docker-compose.qwen35b-a3b.yml up -d
 ~~~
 
 查看状态和日志：
 
 ~~~bash
-docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml ps
+docker compose -f docker-compose.qwen35b-a3b.yml ps
 
-docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml logs -f --tail 200
+docker compose -f docker-compose.qwen35b-a3b.yml logs -f --tail 200
 ~~~
 
 健康检查：
@@ -90,7 +76,7 @@ curl -sS http://127.0.0.1:8080/v1/models
 停止：
 
 ~~~bash
-docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml down
+docker compose -f docker-compose.qwen35b-a3b.yml down
 ~~~
 
 ## 测试 Qwen3.6-27B-W8A8-310P
@@ -98,15 +84,15 @@ docker compose -p qwen35b -f docker-compose.qwen35b-a3b.yml down
 确认 35B 模型已经停止，然后启动：
 
 ~~~bash
-docker compose -p qwen27b -f docker-compose.qwen27b.yml up -d
+docker compose -f docker-compose.qwen27b.yml up -d
 ~~~
 
 查看状态和日志：
 
 ~~~bash
-docker compose -p qwen27b -f docker-compose.qwen27b.yml ps
+docker compose -f docker-compose.qwen27b.yml ps
 
-docker compose -p qwen27b -f docker-compose.qwen27b.yml logs -f --tail 200
+docker compose -f docker-compose.qwen27b.yml logs -f --tail 200
 ~~~
 
 健康检查：
@@ -119,7 +105,7 @@ curl -sS http://127.0.0.1:8080/v1/models
 停止：
 
 ~~~bash
-docker compose -p qwen27b -f docker-compose.qwen27b.yml down
+docker compose -f docker-compose.qwen27b.yml down
 ~~~
 
 ## 文本请求

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     network_mode: host
     shm_size: 10g
-    cpuset: "${CPUSET_A:-0-31}"
+    cpuset: "0-31"
     stop_grace_period: 2m
     devices:
       - /dev/davinci0:/dev/davinci0
@@ -20,7 +20,7 @@ services:
       - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
       - ${QWEN35_MODEL_DIR:-/data/models/Qwen3.6-35B-A3B-w8a8}:/models/qwen:ro
-      - ${CACHE_ROOT:-/data/cache}/qwen36-35b-a3b:/root/.cache:Z
+      - qwen35-cache:/root/.cache
     environment:
       ASCEND_RT_VISIBLE_DEVICES: "0,1"
       PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
@@ -71,3 +71,6 @@ services:
       options:
         max-size: 100m
         max-file: "5"
+
+volumes:
+  qwen35-cache:
