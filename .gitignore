@@ -4,4 +4,4 @@
 .vscode/
 test-images/*
 !test-images/.gitkeep
-test-results/
+test-results.json

@@ -193,7 +193,7 @@ python3 -m json.tool /tmp/qwen-image-response.json
 ## 批量测试火焰和烟雾识别
 
 把待测图片放入项目根目录的 <code>test-images</code>。支持
-<code>jpg</code>、<code>jpeg</code>、<code>png</code> 和 <code>webp</code>，也会递归读取子目录：
+<code>jpg</code>、<code>jpeg</code>、<code>png</code> 和 <code>webp</code>：
 
 ~~~bash
 cd /data/packages/ascend-llm
@@ -207,48 +207,11 @@ ls -lh test-images
 python3 test_fire_smoke.py
 ~~~
 
-工具会自动从 <code>/v1/models</code> 读取当前运行的模型名，使用第一张图片预热一次，
-然后串行测试所有图片。预热请求不计入正式结果。也可以显式指定参数：
+工具会自动读取当前运行的模型名并串行测试所有图片，不需要额外参数。全部结果统一写入项目根目录的
+<code>test-results.json</code>，每张图片只记录图片名、端到端请求耗时和大模型原始回复。
+脚本每处理完一张图片就更新结果文件，因此中途停止时已经完成的结果仍会保留；再次执行会覆盖旧结果。
 
-~~~bash
-python3 test_fire_smoke.py \
-  --model qwen3.6-35b-a3b \
-  --images-dir test-images \
-  --warmup 3 \
-  --timeout 600
-~~~
-
-测试 27B 时可省略 <code>--model</code> 让工具自动识别，或改为：
-
-~~~bash
-python3 test_fire_smoke.py --model qwen3.6-27b --warmup 3
-~~~
-
-每次执行都会创建独立的时间戳目录：
-
-~~~text
-test-results/YYYYMMDD-HHMMSS/
-├── results.csv       每张图片的判断、延迟和 token 统计
-├── summary.json      成功数量、检测数量和延迟汇总
-└── responses/        每张图片的模型原始响应，便于人工复核
-~~~
-
-终端会逐张显示：
-
-~~~text
-[1/12] smoke-01.jpg | fire=no(0.96) smoke=yes(0.93) overall=yes | 2.571s | 25.7 tok/s
-~~~
-
-其中 <code>fire</code> 和 <code>smoke</code> 分别判断火焰与烟雾，取值为
-<code>yes</code>、<code>no</code> 或 <code>uncertain</code>；
-<code>overall=yes</code> 表示至少检测到其中一种。
-
-<code>latency_seconds</code> 是从发送请求到收到完整响应的端到端时间，不包含本地读取图片和
-Base64 编码时间。<code>effective_output_tokens_per_second</code> 使用“输出 token 数 / 端到端延迟”计算，
-适合比较实际调用体验，但不等同于纯解码阶段的 tokens/s。
-
-图片和测试结果默认被 Git 忽略。模型输出只是视觉大模型判断，不是带标注数据集上的准确率；
-如果需要计算准确率、召回率和误报率，还需要为每张图片提供人工真值标签。
+图片和 <code>test-results.json</code> 默认被 Git 忽略。
 
 ## 公平测试原则
 
