@@ -201,13 +201,22 @@ mkdir -p test-images
 ls -lh test-images
 ~~~
 
-确认当前模型的健康检查返回 <code>200</code> 后运行：
+确认当前模型的健康检查返回 <code>200</code> 后运行。默认关闭思考模式：
 
 ~~~bash
 python3 test_fire_smoke.py
+python3 test_fire_smoke.py --thinking off
 ~~~
 
-工具会自动读取当前运行的模型名并串行测试所有图片，不需要额外参数。全部结果统一写入项目根目录的
+需要开启思考模式时：
+
+~~~bash
+python3 test_fire_smoke.py --thinking on
+~~~
+
+开启思考模式时脚本会使用 <code>temperature=0.6</code>、<code>top_p=0.95</code>、
+<code>top_k=20</code> 和 <code>max_tokens=1024</code>；关闭时使用确定性的非思考配置。
+工具会自动读取当前运行的模型名并串行测试所有图片。全部结果统一写入项目根目录的
 <code>test-results.json</code>，每张图片只记录图片名、端到端请求耗时和大模型原始回复。
 脚本每处理完一张图片就更新结果文件，因此中途停止时已经完成的结果仍会保留；再次执行会覆盖旧结果。
 
@@ -223,7 +232,7 @@ python3 test_fire_smoke.py
 - 保持 <code>MAX_NUM_SEQS=8</code>；
 - 保持 <code>MAX_NUM_BATCHED_TOKENS=4096</code>；
 - 保持 <code>GPU_MEMORY_UTILIZATION=0.90</code>；
-- 保持 Thinking 关闭；
+- 两个模型使用相同的 Thinking 设置；
 - 每个模型先预热至少三次，再记录测试结果；
 - 不把首次模型加载和首次图编译时间计入稳定性能结果。
 

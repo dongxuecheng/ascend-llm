@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """逐张测试图片中的火焰/烟雾，并把结果写入一个 JSON 文件。"""
 
+import argparse
 import base64
 import json
 import sys
@@ -27,6 +28,17 @@ PROMPT = """请判断这张图片中是否存在可见火焰或可见烟雾。�
 火焰：是、否或不确定
 烟雾：是、否或不确定
 依据：简要说明可见证据和无法确认的地方"""
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="批量测试图片中的火焰和烟雾")
+    parser.add_argument(
+        "--thinking",
+        choices=("on", "off"),
+        default="off",
+        help="是否开启思考模式，默认：off",
+    )
+    return parser.parse_args()
 
 
 def request_json(url, payload=None):
@@ -78,10 +90,10 @@ def find_images():
     )
 
 
-def build_payload(image_path, model_name):
+def build_payload(image_path, model_name, thinking):
     mime_type = IMAGE_TYPES[image_path.suffix.lower()]
     encoded_image = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return {
+    payload = {
         "model": model_name,
         "messages": [
             {
@@ -103,10 +115,20 @@ def build_payload(image_path, model_name):
                 ],
             },
         ],
-        "max_tokens": 256,
-        "temperature": 0,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": {"enable_thinking": thinking},
     }
+    if thinking:
+        payload.update(
+            {
+                "max_tokens": 1024,
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+            }
+        )
+    else:
+        payload.update({"max_tokens": 256, "temperature": 0})
+    return payload
 
 
 def get_reply(response):
@@ -127,6 +149,8 @@ def save_results(results):
 
 
 def main():
+    args = parse_args()
+    thinking = args.thinking == "on"
     try:
         images = find_images()
         if not images:
@@ -140,6 +164,7 @@ def main():
     save_results(results)
 
     print("model={}".format(model_name))
+    print("thinking={}".format(args.thinking))
     print("images={}".format(len(images)))
 
     for index, image_path in enumerate(images, start=1):
@@ -147,7 +172,7 @@ def main():
         elapsed = None
         started = None
         try:
-            payload = build_payload(image_path, model_name)
+            payload = build_payload(image_path, model_name, thinking)
             started = time.perf_counter()
             response = request_json(API_BASE + "/chat/completions", payload)
             elapsed = round(time.perf_counter() - started, 3)
