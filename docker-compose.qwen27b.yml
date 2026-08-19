@@ -42,7 +42,7 @@ services:
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.90}"
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-8}"
+      - "${MAX_NUM_SEQS:-16}"
       - --max-num-batched-tokens
       - "${MAX_NUM_BATCHED_TOKENS:-4096}"
       - --served-model-name

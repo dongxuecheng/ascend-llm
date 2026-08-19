@@ -229,7 +229,7 @@ python3 test_fire_smoke.py --thinking on
 - 使用同一张图片和相同提示词；
 - 使用同一组 <code>davinci0,1</code>；
 - 保持 <code>MAX_MODEL_LEN=20480</code>；
-- 保持 <code>MAX_NUM_SEQS=8</code>；
+- 保持 <code>MAX_NUM_SEQS=16</code>；
 - 保持 <code>MAX_NUM_BATCHED_TOKENS=4096</code>；
 - 保持 <code>GPU_MEMORY_UTILIZATION=0.90</code>；
 - 两个模型使用相同的 Thinking 设置；
