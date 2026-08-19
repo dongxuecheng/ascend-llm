@@ -1,3 +1,5 @@
+version: "2.4"
+
 services:
   qwen27b:
     image: "${VLLM_IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler}"

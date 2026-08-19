@@ -17,7 +17,7 @@
 ## 前置条件
 
 - <code>npu-smi info</code> 显示 NPU 健康；
-- <code>docker compose version</code> 可以正常执行；
+- <code>docker-compose version</code> 可以正常执行；
 - 已有推理镜像：
   <code>quay.io/ascend/vllm-ascend:v0.23.0-310p-openeuler</code>；
 - 两个模型已经放入 <code>/data/models</code>；
@@ -48,22 +48,26 @@ QWEN27_MODEL_DIR=/data/models/Qwen3.6-27B-W8A8-310P
 
 两份 YAML 已把第一张 Atlas 300I Duo 对应的 CPU 固定为 <code>0-31</code>。模型缓存使用两个独立的 Docker 命名卷，由 Docker 自动创建、持久化并处理 SELinux，无需手工创建缓存目录。
 
-命令不使用 <code>-p</code>。Compose 会默认使用项目目录名 <code>ascend-llm</code> 作为项目名；两个模型轮流运行且服务名、容器名和缓存卷名均不同，因此不需要额外指定项目名。若以后移动加速卡或改变 PCIe 槽位，应重新确认 NUMA 拓扑并更新 YAML 中的 <code>cpuset</code>。
+两份 YAML 使用 <code>version: "2.4"</code>，兼容服务器现有的
+<code>docker-compose 1.22</code>。命令不使用 <code>-p</code>；Compose 会默认使用项目目录名
+<code>ascend-llm</code> 作为项目名。两个模型轮流运行且服务名、容器名和缓存卷名均不同，
+因此不需要额外指定项目名。若以后移动加速卡或改变 PCIe 槽位，应重新确认 NUMA 拓扑并更新
+YAML 中的 <code>cpuset</code>。
 
 ## 测试 Qwen3.6-35B-A3B-W8A8
 
 启动：
 
 ~~~bash
-docker compose -f docker-compose.qwen35b-a3b.yml up -d
+docker-compose -f docker-compose.qwen35b-a3b.yml up -d
 ~~~
 
 查看状态和日志：
 
 ~~~bash
-docker compose -f docker-compose.qwen35b-a3b.yml ps
+docker-compose -f docker-compose.qwen35b-a3b.yml ps
 
-docker compose -f docker-compose.qwen35b-a3b.yml logs -f --tail 200
+docker-compose -f docker-compose.qwen35b-a3b.yml logs -f --tail 200
 ~~~
 
 健康检查：
@@ -76,7 +80,7 @@ curl -sS http://127.0.0.1:8080/v1/models
 停止：
 
 ~~~bash
-docker compose -f docker-compose.qwen35b-a3b.yml down
+docker-compose -f docker-compose.qwen35b-a3b.yml down
 ~~~
 
 ## 测试 Qwen3.6-27B-W8A8-310P
@@ -84,15 +88,15 @@ docker compose -f docker-compose.qwen35b-a3b.yml down
 确认 35B 模型已经停止，然后启动：
 
 ~~~bash
-docker compose -f docker-compose.qwen27b.yml up -d
+docker-compose -f docker-compose.qwen27b.yml up -d
 ~~~
 
 查看状态和日志：
 
 ~~~bash
-docker compose -f docker-compose.qwen27b.yml ps
+docker-compose -f docker-compose.qwen27b.yml ps
 
-docker compose -f docker-compose.qwen27b.yml logs -f --tail 200
+docker-compose -f docker-compose.qwen27b.yml logs -f --tail 200
 ~~~
 
 健康检查：
@@ -105,7 +109,7 @@ curl -sS http://127.0.0.1:8080/v1/models
 停止：
 
 ~~~bash
-docker compose -f docker-compose.qwen27b.yml down
+docker-compose -f docker-compose.qwen27b.yml down
 ~~~
 
 ## 文本请求
@@ -186,6 +190,66 @@ EOF
 python3 -m json.tool /tmp/qwen-image-response.json
 ~~~
 
+## 批量测试火焰和烟雾识别
+
+把待测图片放入项目根目录的 <code>test-images</code>。支持
+<code>jpg</code>、<code>jpeg</code>、<code>png</code> 和 <code>webp</code>，也会递归读取子目录：
+
+~~~bash
+cd /data/packages/ascend-llm
+mkdir -p test-images
+ls -lh test-images
+~~~
+
+确认当前模型的健康检查返回 <code>200</code> 后运行：
+
+~~~bash
+python3 test_fire_smoke.py
+~~~
+
+工具会自动从 <code>/v1/models</code> 读取当前运行的模型名，使用第一张图片预热一次，
+然后串行测试所有图片。预热请求不计入正式结果。也可以显式指定参数：
+
+~~~bash
+python3 test_fire_smoke.py \
+  --model qwen3.6-35b-a3b \
+  --images-dir test-images \
+  --warmup 3 \
+  --timeout 600
+~~~
+
+测试 27B 时可省略 <code>--model</code> 让工具自动识别，或改为：
+
+~~~bash
+python3 test_fire_smoke.py --model qwen3.6-27b --warmup 3
+~~~
+
+每次执行都会创建独立的时间戳目录：
+
+~~~text
+test-results/YYYYMMDD-HHMMSS/
+├── results.csv       每张图片的判断、延迟和 token 统计
+├── summary.json      成功数量、检测数量和延迟汇总
+└── responses/        每张图片的模型原始响应，便于人工复核
+~~~
+
+终端会逐张显示：
+
+~~~text
+[1/12] smoke-01.jpg | fire=no(0.96) smoke=yes(0.93) overall=yes | 2.571s | 25.7 tok/s
+~~~
+
+其中 <code>fire</code> 和 <code>smoke</code> 分别判断火焰与烟雾，取值为
+<code>yes</code>、<code>no</code> 或 <code>uncertain</code>；
+<code>overall=yes</code> 表示至少检测到其中一种。
+
+<code>latency_seconds</code> 是从发送请求到收到完整响应的端到端时间，不包含本地读取图片和
+Base64 编码时间。<code>effective_output_tokens_per_second</code> 使用“输出 token 数 / 端到端延迟”计算，
+适合比较实际调用体验，但不等同于纯解码阶段的 tokens/s。
+
+图片和测试结果默认被 Git 忽略。模型输出只是视觉大模型判断，不是带标注数据集上的准确率；
+如果需要计算准确率、召回率和误报率，还需要为每张图片提供人工真值标签。
+
 ## 公平测试原则
 
 测试两个模型时应保持以下条件完全一致：
@@ -232,5 +296,7 @@ python3 -m json.tool /tmp/qwen-image-response.json
 docker-compose.qwen35b-a3b.yml  Qwen3.6-35B-A3B-W8A8
 docker-compose.qwen27b.yml      Qwen3.6-27B-W8A8-310P
 .env.example                    公共路径和测试参数
+test_fire_smoke.py              火焰/烟雾批量识别与速度统计
+test-images/                    待测图片目录（内容不提交 Git）
 README.md                       启动、调用和测试说明
 ~~~

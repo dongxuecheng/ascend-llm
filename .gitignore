@@ -2,3 +2,6 @@
 *.log
 .idea/
 .vscode/
+test-images/*
+!test-images/.gitkeep
+test-results/
